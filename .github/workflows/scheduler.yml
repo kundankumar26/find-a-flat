@@ -1,0 +1,54 @@
+name: House Search Agent
+
+on:
+  schedule:
+    # Runs every 4 hours (converted to UTC from IST = UTC+5:30)
+    - cron: "30 18,22,2,6,10,14 * * *"
+
+  # Allow manual trigger from GitHub UI anytime
+  workflow_dispatch:
+
+jobs:
+  run-agent:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10   # API approach is fast — no browser needed
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Cache pip packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Restore database (persist seen listings across runs)
+        uses: actions/cache@v4
+        with:
+          path: seen_listings.db
+          key: seen-listings-db-${{ github.run_id }}
+          restore-keys: |
+            seen-listings-db-
+
+      - name: Run House Search Agent
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python main.py
+
+      - name: Save database
+        uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: seen_listings.db
+          key: seen-listings-db-${{ github.run_id }}
