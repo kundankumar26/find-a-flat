@@ -9,12 +9,13 @@ import requests
 import logging
 import base64
 import json
+import urllib3
 
 log = logging.getLogger(__name__)
 
 # ─── Config ───────────────────────────────────────────────────────────────────
-MAX_BUDGET   = 30000
-MIN_BUDGET   = 5000
+MAX_BUDGET   = 33000
+MIN_BUDGET   = 15000
 CITY         = "bangalore"
 MAX_PAGES    = 5       # Each page has ~20 listings → up to 100 listings per run
 SLEEP_BETWEEN_PAGES = 1.5  # seconds, avoids rate-limiting
@@ -32,7 +33,6 @@ HSR_LAYOUT_SEARCH_PARAM = base64.b64encode(json.dumps([
     }
 ]).encode()).decode()
 
-# NoBroker internal API endpoint
 NOBROKER_API = "https://www.nobroker.in/api/v3/multi/property/RENT/filter"
 
 HEADERS = {
@@ -58,107 +58,133 @@ def scrape_nobroker() -> list[dict]:
     all_listings = []
     session = requests.Session()
     session.headers.update(HEADERS)
+    session.verify = False
 
     for page_no in range(1, MAX_PAGES + 1):
         log.info(f"  Fetching page {page_no}/{MAX_PAGES}...")
 
         params = {
-            "pageNo":           page_no,
-            "searchParam":      HSR_LAYOUT_SEARCH_PARAM,
+            "pageNo":             page_no,
+            "searchParam":        HSR_LAYOUT_SEARCH_PARAM,
             "sharedAccomodation": 0,
-            "orderBy":          "nbRank,desc",
-            "radius":           2,
-            "traffic":          "true",
-            "travelTime":       30,
-            "propertyType":     "rent",
-            "rent":             f"{MIN_BUDGET},{MAX_BUDGET}",
-            "buildingType":     "AP,IH",   # Apartment, Independent House
-            "city":             CITY,
+            "orderBy":            "nbRank,desc",
+            "radius":             2,
+            "traffic":            "true",
+            "travelTime":         30,
+            "propertyType":       "rent",
+            "rent":               f"{MIN_BUDGET},{MAX_BUDGET}",
+            "buildingType":       "AP,IH",
+            "city":               CITY,
         }
 
         try:
             resp = session.get(NOBROKER_API, params=params, timeout=15)
             resp.raise_for_status()
             data = resp.json()
-        except requests.exceptions.HTTPError as e:
-            log.error(f"HTTP error on page {page_no}: {e}")
-            break
-        except requests.exceptions.RequestException as e:
+        except Exception as e:
             log.error(f"Request failed on page {page_no}: {e}")
             break
-        except ValueError:
-            log.error(f"Invalid JSON response on page {page_no}")
-            break
 
-        # NoBroker returns data under resp['data'] as a list of property objects
         page_data = data.get("data", [])
-
         if not page_data:
             log.info(f"  No more listings at page {page_no}. Stopping.")
             break
 
+        # Log first item keys so we can see the actual API field names
+        if page_no == 1 and page_data:
+            log.info(f"  API fields available: {list(page_data[0].keys())}")
+
         normalized = [normalize_listing(p) for p in page_data]
         all_listings.extend(normalized)
-        log.info(f"  Got {len(normalized)} listings (total so far: {len(all_listings)})")
-
+        log.info(f"  Got {len(normalized)} listings (total: {len(all_listings)})")
         time.sleep(SLEEP_BETWEEN_PAGES)
 
     return all_listings
 
 
+def safe_int(val) -> int:
+    """Safely convert any value to int, return 0 on failure."""
+    try:
+        return int(float(str(val).replace(",", "").strip()))
+    except Exception:
+        return 0
+
+
 def normalize_listing(prop: dict) -> dict:
-    """
-    Normalizes a raw NoBroker API property object into our standard format.
-    NoBroker API returns very rich data — we extract the most useful fields.
-    """
-    prop_id  = str(prop.get("propertyId") or prop.get("id") or "")
-    city     = prop.get("city", "bangalore").lower()
+    prop_id = str(
+        prop.get("propertyId") or
+        prop.get("id") or
+        prop.get("listingId") or ""
+    )
+
+    # Area — try every known NoBroker field name
+    area = safe_int(
+        prop.get("carpetArea") or
+        prop.get("builtArea") or
+        prop.get("superBuiltArea") or
+        prop.get("area") or
+        prop.get("plotArea") or
+        prop.get("totalArea") or
+        prop.get("floorArea") or 0
+    )
+
+    # BHK title
+    bhk   = prop.get("bhk") or prop.get("bedroomCount") or prop.get("bedrooms") or ""
+    btype = prop.get("buildingType") or prop.get("propertyType") or "Apartment"
+    title = f"{bhk} BHK {btype}".strip()
+
+    # Price
+    price = safe_int(
+        prop.get("rent") or prop.get("price") or prop.get("expectedRent") or 0
+    )
+
+    # Deposit
+    deposit = safe_int(
+        prop.get("deposit") or prop.get("securityDeposit") or 0
+    )
+
+    # Location
+    location = (
+        prop.get("localityName") or
+        prop.get("locality") or
+        prop.get("location") or
+        prop.get("address") or
+        "HSR Layout"
+    )
+
+    # Furnishing
+    furnishing = (
+        prop.get("furnishing") or
+        prop.get("furnishingStatus") or
+        prop.get("furnishingType") or
+        "N/A"
+    )
+
+    # Amenities
+    amenities = prop.get("amenities") or prop.get("amenitiesList") or []
+
+    # Correct NoBroker listing URL format
+    url = f"https://www.nobroker.in/property/residential/rent/bangalore/HSR-Layout?propertyId={prop_id}"
 
     return {
-        # Identity
-        "id":          prop_id,
-        "url":         f"https://www.nobroker.in/property/residential/rent/{city}/{prop_id}",
-
-        # Core listing info
-        "title":       f"{prop.get('bhk', '')} {prop.get('buildingType', 'Property')}".strip(),
-        "price":       int(prop.get("rent", 0) or 0),
-        "deposit":     int(prop.get("deposit", 0) or 0),
-        "area_sqft":   int(prop.get("carpetArea", 0) or prop.get("builtArea", 0) or 0),
-        "furnishing":  prop.get("furnishing", "N/A"),
-
-        # Location
-        "location_raw": prop.get("localityName", "HSR Layout"),
-        "sector":       prop.get("localityName", ""),
-        "latitude":     prop.get("latitude"),
-        "longitude":    prop.get("longitude"),
-
-        # Availability
-        "available_from": prop.get("availableFrom", ""),
-        "property_age":   prop.get("propertyAge", ""),
-
-        # Amenities & features
-        "amenities":    prop.get("amenities", []),
-        "parking":      prop.get("parking", ""),
-        "water_supply": prop.get("waterSupply", ""),
-        "facing":       prop.get("facing", ""),
-        "floor":        f"{prop.get('floorNo', '')} of {prop.get('totalFloor', '')}".strip(" of"),
-
-        # Contact
-        "owner_name":   prop.get("ownerName", ""),
-        "phone":        prop.get("phoneNo", ""),
-
-        # Raw text for AI (JSON dump of full object for rich parsing)
-        "raw_text": json.dumps({
-            "bhk":          prop.get("bhk"),
-            "rent":         prop.get("rent"),
-            "deposit":      prop.get("deposit"),
-            "furnishing":   prop.get("furnishing"),
-            "locality":     prop.get("localityName"),
-            "area":         prop.get("carpetArea"),
-            "amenities":    prop.get("amenities"),
-            "buildingType": prop.get("buildingType"),
-            "availableFrom":prop.get("availableFrom"),
-            "parking":      prop.get("parking"),
-            "facing":       prop.get("facing"),
-        }),
+        "id":             prop_id,
+        "url":            url,
+        "title":          title,
+        "price":          price,
+        "deposit":        deposit,
+        "area_sqft":      area,
+        "furnishing":     furnishing,
+        "location_raw":   location,
+        "sector":         location,
+        "amenities":      amenities,
+        "parking":        prop.get("parking") or prop.get("parkingDetails") or "",
+        "water_supply":   prop.get("waterSupply") or "",
+        "facing":         prop.get("facing") or "",
+        "floor":          str(prop.get("floorNo") or prop.get("floor") or ""),
+        "total_floors":   str(prop.get("totalFloor") or prop.get("totalFloors") or ""),
+        "available_from": prop.get("availableFrom") or prop.get("availabilityDate") or "",
+        "owner_name":     prop.get("ownerName") or prop.get("name") or "",
+        "phone":          prop.get("phoneNo") or prop.get("phone") or prop.get("contactNo") or "",
+        # Full raw dump so AI can extract anything we missed
+        "raw_text":       json.dumps(prop),
     }

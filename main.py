@@ -4,6 +4,8 @@ Runs every 4 hours via GitHub Actions scheduler
 """
 
 import logging
+from dotenv import load_dotenv
+load_dotenv()  # loads .env file for local runs
 from scraper import scrape_nobroker
 from parser_ai import parse_and_rank_listings
 from database import init_db, get_new_listings, mark_as_seen

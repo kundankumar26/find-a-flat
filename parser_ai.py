@@ -5,10 +5,13 @@ Parser Module - Uses OpenAI GPT-4o-mini to parse and rank listings
 import os
 import json
 import logging
+import httpx
 from openai import OpenAI
 
 log = logging.getLogger(__name__)
 
+# Fix SSL issues on local Windows
+http_client = httpx.Client(verify=False)
 client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
 
 SYSTEM_PROMPT = """You are a real estate listing parser for Bangalore rentals.
